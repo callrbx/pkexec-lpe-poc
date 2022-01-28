@@ -13,7 +13,6 @@ make
 
 tested on `Ubuntu 20.04.3 LTS - Linux target 5.4.0-81-generic`
 
-Of note, this will produce a system log error like:
-```
-The value for the SHELL variable was not found the /etc/shells file [USER=root] [TTY=/dev/pts/0] [CWD=/home/icon/pkexec_poc] [COMMAND=GCONV_PATH=./privesc PATH=GCONV_PATH=. CHARSET=PRIVESC SHELL=sh]
-```
+
+No longer produces syslog error, although forking logic needs some work.
+Doesn't seem to be 100% on the first shot, but just run it again.
