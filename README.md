@@ -12,7 +12,3 @@ make
 ```
 
 tested on `Ubuntu 20.04.3 LTS - Linux target 5.4.0-81-generic`
-
-
-No longer produces syslog error, although forking logic needs some work.
-Doesn't seem to be 100% on the first shot, but just run it again.
